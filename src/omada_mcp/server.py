@@ -114,8 +114,8 @@ mcp = FastMCP(
     middleware=_middleware,
 )
 
-session: OmadaSession
-_catalog: cat.Catalog
+session: OmadaSession | None = None
+_catalog: cat.Catalog | None = None
 
 
 def _startup() -> None:
@@ -123,7 +123,7 @@ def _startup() -> None:
 
     Deliberately not module-level: importing this module (for tests, a
     REPL, `fastmcp dev` inspection) shouldn't require live credentials and
-    a reachable controller. Only actually running the server does.
+    a reachable controller. Only actually running the server or calling tools does.
     """
     global session, _catalog, BASE_URL, VERIFY_SSL, READ_ONLY
     BASE_URL = os.environ.get("OMADA_BASE_URL", BASE_URL)
@@ -135,14 +135,34 @@ def _startup() -> None:
     _catalog = cat.build_catalog(spec, source, read_only=READ_ONLY)
 
 
+def get_session() -> OmadaSession:
+    """Lazy-initialize and return the OmadaSession instance."""
+    global session
+    if session is None:
+        _startup()
+    assert session is not None
+    return session
+
+
+def get_catalog() -> cat.Catalog:
+    """Lazy-initialize and return the Catalog instance."""
+    global _catalog
+    if _catalog is None:
+        _startup()
+    assert _catalog is not None
+    return _catalog
+
+
 @mcp.tool
 def server_info() -> dict[str, Any]:
     """Report which Omada API spec this server is running against."""
+    sess = get_session()
+    cata = get_catalog()
     return {
-        "controller_base_url": session.base_url,
-        "spec_source": _catalog.source,
-        "api_version": _catalog.version,
-        "operation_count": len(_catalog.operations),
+        "controller_base_url": sess.base_url,
+        "spec_source": cata.source,
+        "api_version": cata.version,
+        "operation_count": len(cata.operations),
         "read_only": READ_ONLY,
     }
 
@@ -155,7 +175,8 @@ def refresh_catalog() -> dict[str, Any]:
     removed endpoints without restarting this server.
     """
     global _catalog
-    spec, source = cat.load_spec(session.base_url, session.verify_ssl)
+    sess = get_session()
+    spec, source = cat.load_spec(sess.base_url, sess.verify_ssl)
     _catalog = cat.build_catalog(spec, source, read_only=READ_ONLY)
     return server_info()
 
@@ -169,13 +190,14 @@ def search_operations(query: str, limit: int = 20) -> list[dict[str, Any]]:
     match - call get_operation_schema on one before calling it if its
     parameters aren't obvious from the summary.
     """
-    return cat.search(_catalog, query, limit=limit)
+    return cat.search(get_catalog(), query, limit=limit)
 
 
 @mcp.tool
 def get_operation_schema(operation_id: str) -> dict[str, Any]:
     """Get one operation's method, path, parameters, and request body schema."""
-    op = _catalog.operations.get(operation_id)
+    cata = get_catalog()
+    op = cata.operations.get(operation_id)
     if op is None:
         raise ValueError(
             f"unknown operation_id {operation_id!r}; use search_operations to find one"
@@ -205,7 +227,9 @@ def call_operation(
     one) in body. Use get_operation_schema first if unsure what an
     operation needs.
     """
-    op = _catalog.operations.get(operation_id)
+    cata = get_catalog()
+    sess = get_session()
+    op = cata.operations.get(operation_id)
     if op is None:
         raise ValueError(
             f"unknown or disabled operation_id {operation_id!r}; use search_operations to find available ones"
@@ -218,8 +242,8 @@ def call_operation(
         raise ValueError(
             f"operation_id {operation_id!r} is disabled under security allowlist policy."
         )
-    path = cat.build_request_path(op, session.omadac_id, path_params or {})
-    return session.request(op.method, path, **cat.build_call_kwargs(query_params, body))
+    path = cat.build_request_path(op, sess.omadac_id, path_params or {})
+    return sess.request(op.method, path, **cat.build_call_kwargs(query_params, body))
 
 
 def _get_default_site_id() -> str:
@@ -227,9 +251,10 @@ def _get_default_site_id() -> str:
     if env_site_id:
         return env_site_id
     try:
-        sites_res = session.request(
+        sess = get_session()
+        sites_res = sess.request(
             "GET",
-            f"/openapi/v1/{session.omadac_id}/sites",
+            f"/openapi/v1/{sess.omadac_id}/sites",
             params={"page": 1, "pageSize": 10},
         )
         sites: list[dict[str, Any]] = []
@@ -247,9 +272,10 @@ def _get_default_site_id() -> str:
 @mcp.tool
 def list_sites(page: int = 1, page_size: int = 100) -> Any:
     """List sites this controller manages."""
-    return session.request(
+    sess = get_session()
+    return sess.request(
         "GET",
-        f"/openapi/v1/{session.omadac_id}/sites",
+        f"/openapi/v1/{sess.omadac_id}/sites",
         params={"page": page, "pageSize": page_size},
     )
 
@@ -260,8 +286,9 @@ def list_devices(site_id: str | None = None, page: int = 1, page_size: int = 50)
     s_id = site_id or _get_default_site_id()
     if not s_id:
         raise ValueError("site_id is required to list devices. Set OMADA_SITE_ID in .env or pass site_id.")
-    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/devices"
-    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+    sess = get_session()
+    path = f"/openapi/v1/{sess.omadac_id}/sites/{s_id}/devices"
+    return sess.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 @mcp.tool
@@ -270,8 +297,9 @@ def get_lan_networks(site_id: str | None = None, page: int = 1, page_size: int =
     s_id = site_id or _get_default_site_id()
     if not s_id:
         raise ValueError("site_id is required to get LAN networks. Set OMADA_SITE_ID in .env or pass site_id.")
-    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/lan-networks"
-    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+    sess = get_session()
+    path = f"/openapi/v1/{sess.omadac_id}/sites/{s_id}/lan-networks"
+    return sess.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 @mcp.tool
@@ -280,8 +308,9 @@ def list_clients(site_id: str | None = None, page: int = 1, page_size: int = 50)
     s_id = site_id or _get_default_site_id()
     if not s_id:
         raise ValueError("site_id is required to list clients. Set OMADA_SITE_ID in .env or pass site_id.")
-    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/clients"
-    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+    sess = get_session()
+    path = f"/openapi/v1/{sess.omadac_id}/sites/{s_id}/clients"
+    return sess.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 @mcp.tool
@@ -290,8 +319,9 @@ def get_topology(site_id: str | None = None) -> Any:
     s_id = site_id or _get_default_site_id()
     if not s_id:
         raise ValueError("site_id is required to get topology. Set OMADA_SITE_ID in .env or pass site_id.")
-    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/topology"
-    return session.request("GET", path)
+    sess = get_session()
+    path = f"/openapi/v1/{sess.omadac_id}/sites/{s_id}/topology"
+    return sess.request("GET", path)
 
 
 @mcp.tool
@@ -300,8 +330,9 @@ def list_ip_groups(site_id: str | None = None, page: int = 1, page_size: int = 5
     s_id = site_id or _get_default_site_id()
     if not s_id:
         raise ValueError("site_id is required to list IP groups. Set OMADA_SITE_ID in .env or pass site_id.")
-    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/profiles/groups"
-    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+    sess = get_session()
+    path = f"/openapi/v1/{sess.omadac_id}/sites/{s_id}/profiles/groups"
+    return sess.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 @mcp.tool
@@ -310,8 +341,9 @@ def list_gateway_acls(site_id: str | None = None, page: int = 1, page_size: int 
     s_id = site_id or _get_default_site_id()
     if not s_id:
         raise ValueError("site_id is required to list gateway ACLs. Set OMADA_SITE_ID in .env or pass site_id.")
-    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/acls/osg-acls"
-    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+    sess = get_session()
+    path = f"/openapi/v1/{sess.omadac_id}/sites/{s_id}/acls/osg-acls"
+    return sess.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 @mcp.tool
@@ -320,8 +352,9 @@ def list_time_range_profiles(site_id: str | None = None, page: int = 1, page_siz
     s_id = site_id or _get_default_site_id()
     if not s_id:
         raise ValueError("site_id is required to list time range profiles. Set OMADA_SITE_ID in .env or pass site_id.")
-    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/time-range-profiles"
-    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+    sess = get_session()
+    path = f"/openapi/v1/{sess.omadac_id}/sites/{s_id}/time-range-profiles"
+    return sess.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 class CombinedMCPApp:
