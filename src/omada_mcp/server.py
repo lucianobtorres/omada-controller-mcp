@@ -324,17 +324,22 @@ def list_time_range_profiles(site_id: str | None = None, page: int = 1, page_siz
     return session.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
-class MCPRoutingMiddleware:
-    """ASGI Middleware to resolve MCP client routing quirks:
+class CombinedMCPApp:
+    """Hybrid ASGI application that routes requests to SSE or Streamable HTTP.
 
-    1. Intercepts POST requests sent to /sse, /mcp, or / and rewrites their path to /messages
-       so Starlette routes them to the SSE message handler (handle_post_message).
-    2. If POST /messages is missing session_id in query_string, auto-resolves session_id
-       from active SSE sessions if an active session exists.
+    1. GET /sse or /: Routed to SSE connection handler (app_sse).
+    2. POST /sse, /messages, /messages/, /mcp, /:
+       - If session_id is in query string or an active SSE session exists:
+         Rewrites path to /messages/ (with trailing slash to avoid 307 redirects)
+         and routes to app_sse.
+       - Otherwise (no active SSE session / stateless request):
+         Rewrites path to /mcp and routes to app_streamable (StreamableHTTPASGIApp)
+         which executes JSON-RPC POST requests directly with 200 OK.
     """
 
-    def __init__(self, app: Any, sse_transport: Any = None) -> None:
-        self.app = app
+    def __init__(self, sse_app: Any, streamable_app: Any, sse_transport: Any = None) -> None:
+        self.sse_app = sse_app
+        self.streamable_app = streamable_app
         self.sse_transport = sse_transport
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -342,42 +347,70 @@ class MCPRoutingMiddleware:
             method = scope.get("method", "GET")
             path = scope.get("path", "")
 
-            # If client sends POST to /sse, /mcp, or /, rewrite to /messages
-            if method == "POST" and path in ("/sse", "/mcp", "/"):
-                scope["path"] = "/messages"
-                scope["raw_path"] = b"/messages"
+            # Normalize GET / or /sse to /sse
+            if method == "GET" and path in ("/sse", "/"):
+                scope["path"] = "/sse"
+                scope["raw_path"] = b"/sse"
+                await self.sse_app(scope, receive, send)
+                return
 
-            # If client posts to /messages without session_id in query string
-            if method == "POST" and scope.get("path") == "/messages":
+            if method == "POST" and path in ("/sse", "/messages", "/messages/", "/mcp", "/"):
                 query_string = scope.get("query_string", b"").decode("utf-8")
-                if "session_id=" not in query_string and self.sse_transport is not None:
+
+                active_session_id = None
+                if self.sse_transport:
                     writers = getattr(self.sse_transport, "_read_stream_writers", {})
                     if writers:
-                        # Auto-resolve session_id to active session
                         active_session_id = next(iter(writers.keys())).hex
+
+                if "session_id=" in query_string or active_session_id:
+                    if "session_id=" not in query_string and active_session_id:
                         new_query = f"session_id={active_session_id}"
                         if query_string:
                             new_query = f"{query_string}&{new_query}"
                         scope["query_string"] = new_query.encode("utf-8")
 
-        await self.app(scope, receive, send)
+                    # Note trailing slash /messages/ to avoid 307 Temporary Redirect
+                    scope["path"] = "/messages/"
+                    scope["raw_path"] = b"/messages/"
+                    await self.sse_app(scope, receive, send)
+                    return
+                else:
+                    # Fall back to Streamable HTTP transport for stateless/direct POST
+                    scope["path"] = "/mcp"
+                    scope["raw_path"] = b"/mcp"
+                    await self.streamable_app(scope, receive, send)
+                    return
+
+        await self.sse_app(scope, receive, send)
 
 
 def build_server_app(transport: str = "sse") -> Any:
-    """Construct the FastMCP HTTP/SSE ASGI application wrapped with MCPRoutingMiddleware."""
-    app = mcp.http_app(
-        transport=transport,
+    """Construct the combined FastMCP ASGI application (SSE + Streamable HTTP)."""
+    from starlette.applications import Starlette
+
+    app_sse = mcp.http_app(
+        transport="sse",
+        host_origin_protection="auto",
+        allowed_hosts=ALLOWED_HOSTS or None,
+    )
+    app_streamable = mcp.http_app(
+        transport="http",
         host_origin_protection="auto",
         allowed_hosts=ALLOWED_HOSTS or None,
     )
 
     sse_transport = None
-    for r in getattr(app, "routes", []):
+    for r in getattr(app_sse, "routes", []):
         if getattr(r, "path", None) == "/messages" and hasattr(r, "app") and hasattr(r.app, "__self__"):
             sse_transport = r.app.__self__
             break
 
-    return MCPRoutingMiddleware(app, sse_transport=sse_transport)
+    combined = CombinedMCPApp(app_sse, app_streamable, sse_transport=sse_transport)
+    parent_app = Starlette(lifespan=app_streamable.router.lifespan_context)
+    parent_app.mount("", combined)
+
+    return parent_app
 
 
 def main() -> None:
