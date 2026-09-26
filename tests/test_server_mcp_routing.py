@@ -66,3 +66,29 @@ def test_combined_app_post_mcp_and_root() -> None:
             },
         )
         assert response_mcp.status_code == 200
+
+
+def test_subscriptions_listen_returns_200_ok() -> None:
+    """Test POST subscriptions/listen returns 200 OK with empty result object."""
+    app = build_server_app(transport="sse")
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "method": "subscriptions/listen",
+                "id": 42,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"jsonrpc": "2.0", "id": 42, "result": {}}
+
+
+def test_well_known_oauth_returns_200_ok() -> None:
+    """Test GET /.well-known/oauth-protected-resource returns 200 OK with {}."""
+    app = build_server_app(transport="sse")
+    with TestClient(app) as client:
+        response = client.get("/.well-known/oauth-protected-resource")
+        assert response.status_code == 200
+        assert response.json() == {}

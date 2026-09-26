@@ -327,11 +327,13 @@ def list_time_range_profiles(site_id: str | None = None, page: int = 1, page_siz
 class CombinedMCPApp:
     """Hybrid ASGI application that routes requests to SSE or Streamable HTTP.
 
-    1. GET /sse or /: Routed to SSE connection handler (app_sse).
-    2. POST /sse, /messages, /messages/, /mcp, /:
+    1. GET /.well-known/*: Returns 200 OK JSON {} to suppress OAuth probe errors.
+    2. GET /sse or /: Routed to SSE connection handler (app_sse).
+    3. POST /sse, /messages, /messages/, /mcp, /:
+       - Intercepts subscriptions/listen and subscriptions/subscribe methods
+         with immediate 200 OK JSON-RPC result {}.
        - If session_id is in query string or an active SSE session exists:
-         Rewrites path to /messages/ (with trailing slash to avoid 307 redirects)
-         and routes to app_sse.
+         Rewrites path to /messages and routes to app_sse.
        - Otherwise (no active SSE session / stateless request):
          Rewrites path to /mcp and routes to app_streamable (StreamableHTTPASGIApp)
          which executes JSON-RPC POST requests directly with 200 OK.
@@ -343,9 +345,17 @@ class CombinedMCPApp:
         self.sse_transport = sse_transport
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        from starlette.responses import JSONResponse
+
         if scope.get("type") == "http":
             method = scope.get("method", "GET")
             path = scope.get("path", "")
+
+            # Suppress OAuth discovery noise / 404s
+            if method == "GET" and path.startswith("/.well-known/"):
+                response = JSONResponse({}, status_code=200)
+                await response(scope, receive, send)
+                return
 
             # Normalize GET / or /sse to /sse
             if method == "GET" and path in ("/sse", "/"):
@@ -354,35 +364,76 @@ class CombinedMCPApp:
                 await self.sse_app(scope, receive, send)
                 return
 
-            if method == "POST" and path in ("/sse", "/messages", "/messages/", "/mcp", "/"):
-                query_string = scope.get("query_string", b"").decode("utf-8")
+            if method == "POST":
+                # Read body bytes to inspect JSON-RPC method
+                body_bytes = b""
+                more_body = True
+                while more_body:
+                    msg = await receive()
+                    if msg.get("type") == "http.request":
+                        body_bytes += msg.get("body", b"")
+                        more_body = msg.get("more_body", False)
 
-                active_session_id = None
-                if self.sse_transport:
-                    writers = getattr(self.sse_transport, "_read_stream_writers", {})
-                    if writers:
-                        active_session_id = next(iter(writers.keys())).hex
+                body_sent = False
 
-                if "session_id=" in query_string or active_session_id:
-                    if "session_id=" not in query_string and active_session_id:
-                        new_query = f"session_id={active_session_id}"
-                        if query_string:
-                            new_query = f"{query_string}&{new_query}"
-                        scope["query_string"] = new_query.encode("utf-8")
+                async def custom_receive() -> dict[str, Any]:
+                    nonlocal body_sent
+                    if not body_sent:
+                        body_sent = True
+                        return {"type": "http.request", "body": body_bytes, "more_body": False}
+                    return await receive()
 
-                    # Route to /messages (no trailing slash) as registered by FastMCP SSE
-                    scope["path"] = "/messages"
-                    scope["raw_path"] = b"/messages"
-                    await self.sse_app(scope, receive, send)
-                    return
-                else:
-                    # Fall back to Streamable HTTP transport for stateless/direct POST
-                    scope["path"] = "/mcp"
-                    scope["raw_path"] = b"/mcp"
-                    await self.streamable_app(scope, receive, send)
-                    return
+                try:
+                    import json
 
-        await self.sse_app(scope, receive, send)
+                    data = json.loads(body_bytes.decode("utf-8"))
+                    req_method = None
+                    req_id = None
+                    if isinstance(data, dict):
+                        req_method = data.get("method")
+                        req_id = data.get("id")
+
+                    if req_method in ("subscriptions/listen", "subscriptions/subscribe") or (
+                        isinstance(req_method, str) and req_method.startswith("subscriptions/")
+                    ):
+                        response = JSONResponse(
+                            {"jsonrpc": "2.0", "id": req_id, "result": {}}, status_code=200
+                        )
+                        await response(scope, custom_receive, send)
+                        return
+                except Exception:
+                    pass
+
+                if path in ("/sse", "/messages", "/messages/", "/mcp", "/"):
+                    query_string = scope.get("query_string", b"").decode("utf-8")
+
+                    active_session_id = None
+                    if self.sse_transport:
+                        writers = getattr(self.sse_transport, "_read_stream_writers", {})
+                        if writers:
+                            active_session_id = next(iter(writers.keys())).hex
+
+                    if "session_id=" in query_string or active_session_id:
+                        if "session_id=" not in query_string and active_session_id:
+                            new_query = f"session_id={active_session_id}"
+                            if query_string:
+                                new_query = f"{query_string}&{new_query}"
+                            scope["query_string"] = new_query.encode("utf-8")
+
+                        # Route to /messages (no trailing slash) as registered by FastMCP SSE
+                        scope["path"] = "/messages"
+                        scope["raw_path"] = b"/messages"
+                        await self.sse_app(scope, custom_receive, send)
+                        return
+                    else:
+                        # Fall back to Streamable HTTP transport for stateless/direct POST
+                        scope["path"] = "/mcp"
+                        scope["raw_path"] = b"/mcp"
+                        await self.streamable_app(scope, custom_receive, send)
+                        return
+
+                await self.sse_app(scope, custom_receive, send)
+                return
 
 
 def build_server_app(transport: str = "sse") -> Any:
