@@ -181,16 +181,13 @@ def build_catalog(
     source: str,
     *,
     include_deprecated: bool = False,
-    read_only: bool | None = None,
+    read_only: bool = False,
 ) -> Catalog:
     """Index every {omadacId}-scoped operation in the spec by operationId.
 
     Excludes MSP ({mspId}-scoped) paths and deprecated operations by default.
-    Applies OMADA_MCP_READ_ONLY and domain allowlist guardrails by default.
+    Applies OMADA_MCP_READ_ONLY and domain allowlist guardrails when read_only=True.
     """
-    if read_only is None:
-        read_only = os.environ.get("OMADA_MCP_READ_ONLY", "true").lower() in ("true", "1", "yes")
-
     operations: dict[str, Operation] = {}
     for path, item in spec.get("paths", {}).items():
         if f"{{{_OMADAC_ID_PARAM}}}" not in path:
@@ -204,7 +201,7 @@ def build_catalog(
             if not operation_id:
                 continue
             summary = op.get("summary", "")
-            if not is_operation_allowed(method, path, operation_id, summary, read_only=read_only):
+            if read_only and not is_operation_allowed(method, path, operation_id, summary, read_only=True):
                 continue
             params = [
                 {

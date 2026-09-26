@@ -324,14 +324,74 @@ def list_time_range_profiles(site_id: str | None = None, page: int = 1, page_siz
     return session.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
+class MCPRoutingMiddleware:
+    """ASGI Middleware to resolve MCP client routing quirks:
+
+    1. Intercepts POST requests sent to /sse, /mcp, or / and rewrites their path to /messages
+       so Starlette routes them to the SSE message handler (handle_post_message).
+    2. If POST /messages is missing session_id in query_string, auto-resolves session_id
+       from active SSE sessions if an active session exists.
+    """
+
+    def __init__(self, app: Any, sse_transport: Any = None) -> None:
+        self.app = app
+        self.sse_transport = sse_transport
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            method = scope.get("method", "GET")
+            path = scope.get("path", "")
+
+            # If client sends POST to /sse, /mcp, or /, rewrite to /messages
+            if method == "POST" and path in ("/sse", "/mcp", "/"):
+                scope["path"] = "/messages"
+                scope["raw_path"] = b"/messages"
+
+            # If client posts to /messages without session_id in query string
+            if method == "POST" and scope.get("path") == "/messages":
+                query_string = scope.get("query_string", b"").decode("utf-8")
+                if "session_id=" not in query_string and self.sse_transport is not None:
+                    writers = getattr(self.sse_transport, "_read_stream_writers", {})
+                    if writers:
+                        # Auto-resolve session_id to active session
+                        active_session_id = next(iter(writers.keys())).hex
+                        new_query = f"session_id={active_session_id}"
+                        if query_string:
+                            new_query = f"{query_string}&{new_query}"
+                        scope["query_string"] = new_query.encode("utf-8")
+
+        await self.app(scope, receive, send)
+
+
+def build_server_app(transport: str = "sse") -> Any:
+    """Construct the FastMCP HTTP/SSE ASGI application wrapped with MCPRoutingMiddleware."""
+    app = mcp.http_app(
+        transport=transport,
+        host_origin_protection="auto",
+        allowed_hosts=ALLOWED_HOSTS or None,
+    )
+
+    sse_transport = None
+    for r in getattr(app, "routes", []):
+        if getattr(r, "path", None) == "/messages" and hasattr(r, "app") and hasattr(r.app, "__self__"):
+            sse_transport = r.app.__self__
+            break
+
+    return MCPRoutingMiddleware(app, sse_transport=sse_transport)
+
+
 def main() -> None:
     _startup()
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     transport = fastmcp.settings.transport
     if transport in ("http", "streamable-http", "sse"):
-        # host_origin_protection/allowed_hosts are HTTP-only kwargs - passing
-        # them under stdio would raise, since run_stdio_async doesn't accept them.
-        mcp.run(host_origin_protection="auto", allowed_hosts=ALLOWED_HOSTS or None)
+        import uvicorn
+
+        host = fastmcp.settings.host
+        port = fastmcp.settings.port
+        app = build_server_app(transport=transport)
+        logging.info(f"Starting Omada MCP server with transport {transport!r} on http://{host}:{port}/")
+        uvicorn.run(app, host=host, port=port, log_level=fastmcp.settings.log_level.lower())
     else:
         mcp.run()
 
