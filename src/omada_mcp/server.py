@@ -255,9 +255,23 @@ def list_sites(page: int = 1, page_size: int = 100) -> Any:
 
 
 @mcp.tool
-def list_devices() -> Any:
-    """List all managed devices (access points, switches, gateways) across every site."""
-    return session.request("GET", f"/openapi/v1/{session.omadac_id}/devices")
+def list_devices(site_id: str | None = None, page: int = 1, page_size: int = 50) -> Any:
+    """List managed devices (access points, switches, gateways) for a specific site or default site."""
+    s_id = site_id or _get_default_site_id()
+    if not s_id:
+        raise ValueError("site_id is required to list devices. Set OMADA_SITE_ID in .env or pass site_id.")
+    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/devices"
+    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+
+
+@mcp.tool
+def get_lan_networks(site_id: str | None = None, page: int = 1, page_size: int = 50) -> Any:
+    """Get LAN network configurations (subnets, gateways, DNS servers) for a specific site or default site."""
+    s_id = site_id or _get_default_site_id()
+    if not s_id:
+        raise ValueError("site_id is required to get LAN networks. Set OMADA_SITE_ID in .env or pass site_id.")
+    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/lan-networks"
+    return session.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 @mcp.tool
@@ -278,6 +292,36 @@ def get_topology(site_id: str | None = None) -> Any:
         raise ValueError("site_id is required to get topology. Set OMADA_SITE_ID in .env or pass site_id.")
     path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/topology"
     return session.request("GET", path)
+
+
+@mcp.tool
+def list_ip_groups(site_id: str | None = None, page: int = 1, page_size: int = 50) -> Any:
+    """List IP group profiles for a specific site or default site."""
+    s_id = site_id or _get_default_site_id()
+    if not s_id:
+        raise ValueError("site_id is required to list IP groups. Set OMADA_SITE_ID in .env or pass site_id.")
+    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/profiles/groups"
+    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+
+
+@mcp.tool
+def list_gateway_acls(site_id: str | None = None, page: int = 1, page_size: int = 50) -> Any:
+    """List gateway ACL rules for a specific site or default site."""
+    s_id = site_id or _get_default_site_id()
+    if not s_id:
+        raise ValueError("site_id is required to list gateway ACLs. Set OMADA_SITE_ID in .env or pass site_id.")
+    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/acls/osg-acls"
+    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+
+
+@mcp.tool
+def list_time_range_profiles(site_id: str | None = None, page: int = 1, page_size: int = 50) -> Any:
+    """List time range profiles for a specific site or default site."""
+    s_id = site_id or _get_default_site_id()
+    if not s_id:
+        raise ValueError("site_id is required to list time range profiles. Set OMADA_SITE_ID in .env or pass site_id.")
+    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/time-range-profiles"
+    return session.request("GET", path, params={"page": page, "pageSize": page_size})
 
 
 def main() -> None:

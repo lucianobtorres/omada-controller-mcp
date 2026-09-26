@@ -25,11 +25,15 @@ from omada_mcp import server
 from omada_mcp.server import (
     _startup,
     call_operation as mcp_call_operation,
+    get_lan_networks as mcp_get_lan_networks,
     get_operation_schema as mcp_get_operation_schema,
     get_topology as mcp_get_topology,
     list_clients as mcp_list_clients,
     list_devices as mcp_list_devices,
+    list_gateway_acls as mcp_list_gateway_acls,
+    list_ip_groups as mcp_list_ip_groups,
     list_sites as mcp_list_sites,
+    list_time_range_profiles as mcp_list_time_range_profiles,
     search_operations as mcp_search_operations,
 )
 
@@ -37,10 +41,10 @@ from omada_mcp.server import (
 SYSTEM_INSTRUCTION = """Você é o OmadaSecOps, um assistente sênior especialista em Engenharia de Redes, Segurança da Informação e Arquitetura de Redes TP-Link Omada SDN.
 
 Sua missão:
-1. Auxiliar o administrador de rede na consulta, análise de status, monitoramento de clientes conectados, topologia e regras de rede (VLANs, ACLs) do Omada Controller local.
+1. Auxiliar o administrador de rede na consulta, análise de status, monitoramento de clientes conectados, topologia, subnets/LAN, servidores DNS, grupos de IP, perfis de horário e regras de rede (VLANs, ACLs) do Omada Controller local.
 2. Atuar com postura defensiva e transparente. Todas as operações estão protegidas pela política de segurança Read-Only/Allowlist do projeto.
-3. Utilizar ativamente as ferramentas integradas (`list_devices`, `list_clients`, `list_sites`, `get_topology`, `search_operations`, `get_operation_schema`, `call_operation`) para coletar dados empíricos em tempo real antes de responder.
-4. Fornecer respostas claras, técnicas e estruturadas em Português do Brasil (PT-BR), destacando modelos de equipamentos (ex: roteador ER605, switches JetStream, APs EAP), IPs, MACs, VLANs e diagnósticos de rede.
+3. Utilizar ativamente as ferramentas integradas (`list_devices`, `list_clients`, `list_sites`, `get_topology`, `get_lan_networks`, `list_ip_groups`, `list_gateway_acls`, `list_time_range_profiles`, `search_operations`, `get_operation_schema`, `call_operation`) para coletar dados empíricos em tempo real antes de responder.
+4. Fornecer respostas claras, técnicas e estruturadas em Português do Brasil (PT-BR), destacando modelos de equipamentos (ex: roteador ER605, switches JetStream, APs EAP), IPs, MACs, VLANs, servidores DNS e diagnósticos de rede.
 """
 
 
@@ -54,9 +58,10 @@ def list_sites() -> str:
     return _to_json_str(mcp_list_sites())
 
 
-def list_devices() -> str:
-    """Lista todos os dispositivos gerenciados (roteador ER605, switches, APs) no Omada Controller."""
-    return _to_json_str(mcp_list_devices())
+def list_devices(site_id: str = "") -> str:
+    """Lista todos os dispositivos gerenciados (roteador ER605, switches, APs) no Omada Controller. Se site_id for fornecido, filtra por esse site."""
+    s_id = site_id if site_id else None
+    return _to_json_str(mcp_list_devices(site_id=s_id))
 
 
 def list_clients(site_id: str = "") -> str:
@@ -69,6 +74,30 @@ def get_topology(site_id: str = "") -> str:
     """Obtém os dados de topologia física e lógica da rede Omada. Se site_id for fornecido, filtra por esse site."""
     s_id = site_id if site_id else None
     return _to_json_str(mcp_get_topology(site_id=s_id))
+
+
+def get_lan_networks(site_id: str = "") -> str:
+    """Obtém as configurações de redes LAN (subnets, gateways, servidores DNS) configurados no Omada Controller."""
+    s_id = site_id if site_id else None
+    return _to_json_str(mcp_get_lan_networks(site_id=s_id))
+
+
+def list_ip_groups(site_id: str = "") -> str:
+    """Lista os grupos de IP (IP Group Profiles) cadastrados no Omada Controller."""
+    s_id = site_id if site_id else None
+    return _to_json_str(mcp_list_ip_groups(site_id=s_id))
+
+
+def list_gateway_acls(site_id: str = "") -> str:
+    """Lista as regras de ACL de Gateway (OSG ACLs) configuradas no Omada Controller."""
+    s_id = site_id if site_id else None
+    return _to_json_str(mcp_list_gateway_acls(site_id=s_id))
+
+
+def list_time_range_profiles(site_id: str = "") -> str:
+    """Lista os perfis de horário (Time Range Profiles) configurados no Omada Controller."""
+    s_id = site_id if site_id else None
+    return _to_json_str(mcp_list_time_range_profiles(site_id=s_id))
 
 
 def search_operations(query: str = "", limit: int = 20) -> str:
@@ -131,6 +160,10 @@ def main() -> None:
         list_devices,
         list_clients,
         get_topology,
+        get_lan_networks,
+        list_ip_groups,
+        list_gateway_acls,
+        list_time_range_profiles,
         search_operations,
         get_operation_schema,
         call_operation,

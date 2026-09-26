@@ -22,7 +22,21 @@ import httpx
 _DEV_SPEC_PATH = Path(__file__).resolve().parent.parent.parent / "openapi" / "controller-spec.json"
 _METHODS = ("get", "post", "put", "delete", "patch")
 _OMADAC_ID_PARAM = "omadacId"
-_ALLOWED_KEYWORDS = ("device", "client", "vlan", "network", "lan-network", "acl", "topology", "site")
+_ALLOWED_KEYWORDS = (
+    "device",
+    "client",
+    "vlan",
+    "network",
+    "lan-network",
+    "lan-networks",
+    "acl",
+    "topology",
+    "site",
+    "profile",
+    "group",
+    "time-range",
+    "osg-acl",
+)
 
 
 def is_operation_allowed(
