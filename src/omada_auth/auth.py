@@ -175,9 +175,7 @@ class OmadaSession:
         Returns the parsed ``result`` field; raises RuntimeError on a
         non-zero ``errorCode`` or a non-2xx response.
         """
-        # Same reasoning as _fetch_token: an uncaught httpx exception here
-        # carries the request, whose headers hold the live access token -
-        # never let one escape this function.
+        full_url = f"{self.base_url}{path}"
         try:
             with self._raw_client() as c:
                 resp = c.request(
@@ -186,11 +184,23 @@ class OmadaSession:
                     headers={"Authorization": f"AccessToken={self.token}"},
                     **kwargs,
                 )
+                status_code = resp.status_code
+                raw_text = resp.text
                 resp.raise_for_status()
                 body = resp.json()
         except (httpx.HTTPError, ValueError) as e:
+            resp_obj = getattr(e, "response", None)
+            st = resp_obj.status_code if resp_obj is not None else "N/A"
+            txt = resp_obj.text if resp_obj is not None else str(e)
+            print(f"\n[DEBUG] URL requisitada: {full_url}")
+            print(f"[DEBUG] Status HTTP: {st}")
+            print(f"[DEBUG] Resposta bruta do Omada: {txt}\n", file=sys.stderr)
             raise RuntimeError(f"request to {path} failed: {type(e).__name__}") from None
+
         if body.get("errorCode") != 0:
+            print(f"\n[DEBUG] URL requisitada: {full_url}")
+            print(f"[DEBUG] Status HTTP: {status_code} (errorCode={body.get('errorCode')})")
+            print(f"[DEBUG] Resposta bruta do Omada: {raw_text}\n", file=sys.stderr)
             raise RuntimeError(f"Omada API error {body.get('errorCode')}: {body.get('msg')}")
         return body.get("result")
 

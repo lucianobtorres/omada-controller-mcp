@@ -22,6 +22,27 @@ import httpx
 _DEV_SPEC_PATH = Path(__file__).resolve().parent.parent.parent / "openapi" / "controller-spec.json"
 _METHODS = ("get", "post", "put", "delete", "patch")
 _OMADAC_ID_PARAM = "omadacId"
+_ALLOWED_KEYWORDS = ("device", "client", "vlan", "network", "lan-network", "acl", "topology", "site")
+
+
+def is_operation_allowed(
+    method: str,
+    path: str,
+    operation_id: str = "",
+    summary: str = "",
+    read_only: bool = True,
+) -> bool:
+    """Validate if an operation satisfies security guardrails.
+
+    When read_only is True (default):
+    - Only GET requests are allowed.
+    - Path/operation_id/summary must match allowed domains: devices, clients, networks/vlans, ACLs, topology, sites.
+    """
+    if read_only and method.upper() != "GET":
+        return False
+
+    text_to_check = f"{path} {operation_id} {summary}".lower()
+    return any(kw in text_to_check for kw in _ALLOWED_KEYWORDS)
 
 
 @dataclass(frozen=True)
@@ -82,7 +103,7 @@ def _load_bundled_spec() -> dict[str, Any] | None:
     path = _bundled_spec_path()
     if path is None:
         return None
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def load_spec(base_url: str, verify_ssl: bool) -> tuple[dict[str, Any], str]:
@@ -142,16 +163,20 @@ def _resolve_schema(
 
 
 def build_catalog(
-    spec: dict[str, Any], source: str, *, include_deprecated: bool = False
+    spec: dict[str, Any],
+    source: str,
+    *,
+    include_deprecated: bool = False,
+    read_only: bool | None = None,
 ) -> Catalog:
     """Index every {omadacId}-scoped operation in the spec by operationId.
 
-    Excludes MSP (``{mspId}``-scoped, multi-tenant reseller) paths: this
-    server authenticates as a single-site client-credentials app, which
-    can't resolve an mspId scope - not a size trim, an auth-scope limit.
-    Excludes deprecated operations by default (``include_deprecated=True``
-    to keep them).
+    Excludes MSP ({mspId}-scoped) paths and deprecated operations by default.
+    Applies OMADA_MCP_READ_ONLY and domain allowlist guardrails by default.
     """
+    if read_only is None:
+        read_only = os.environ.get("OMADA_MCP_READ_ONLY", "true").lower() in ("true", "1", "yes")
+
     operations: dict[str, Operation] = {}
     for path, item in spec.get("paths", {}).items():
         if f"{{{_OMADAC_ID_PARAM}}}" not in path:
@@ -163,6 +188,9 @@ def build_catalog(
                 continue
             operation_id = op.get("operationId")
             if not operation_id:
+                continue
+            summary = op.get("summary", "")
+            if not is_operation_allowed(method, path, operation_id, summary, read_only=read_only):
                 continue
             params = [
                 {

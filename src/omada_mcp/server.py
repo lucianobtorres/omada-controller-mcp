@@ -59,6 +59,7 @@ from omada_mcp import catalog as cat
 BASE_URL = os.environ.get("OMADA_BASE_URL", "https://your-controller.local:8043")
 VERIFY_SSL = os.environ.get("OMADA_VERIFY_SSL", "false").lower() == "true"
 AUTH_TOKEN = os.environ.get("OMADA_MCP_AUTH_TOKEN")
+READ_ONLY = os.environ.get("OMADA_MCP_READ_ONLY", "true").lower() in ("true", "1", "yes")
 RATE_LIMIT_PER_SECOND = float(os.environ.get("OMADA_MCP_RATE_LIMIT", "20"))
 ALLOWED_HOSTS = [
     h.strip() for h in os.environ.get("OMADA_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()
@@ -105,7 +106,7 @@ mcp = FastMCP(
     name="omada",
     instructions=(
         "Query and manage a TP-Link Omada SDN controller on the local LAN. "
-        "Start with list_sites/list_devices for common questions, or "
+        "Start with list_sites/list_devices/list_clients/get_topology for common questions, or "
         "search_operations to find any other operation this controller "
         "supports, then get_operation_schema before calling an unfamiliar one."
     ),
@@ -124,10 +125,14 @@ def _startup() -> None:
     REPL, `fastmcp dev` inspection) shouldn't require live credentials and
     a reachable controller. Only actually running the server does.
     """
-    global session, _catalog
+    global session, _catalog, BASE_URL, VERIFY_SSL, READ_ONLY
+    BASE_URL = os.environ.get("OMADA_BASE_URL", BASE_URL)
+    VERIFY_SSL = os.environ.get("OMADA_VERIFY_SSL", "false").lower() == "true"
+    READ_ONLY = os.environ.get("OMADA_MCP_READ_ONLY", "true").lower() in ("true", "1", "yes")
+
     session = OmadaSession(base_url=BASE_URL, verify_ssl=VERIFY_SSL)
     spec, source = cat.load_spec(session.base_url, session.verify_ssl)
-    _catalog = cat.build_catalog(spec, source)
+    _catalog = cat.build_catalog(spec, source, read_only=READ_ONLY)
 
 
 @mcp.tool
@@ -138,6 +143,7 @@ def server_info() -> dict[str, Any]:
         "spec_source": _catalog.source,
         "api_version": _catalog.version,
         "operation_count": len(_catalog.operations),
+        "read_only": READ_ONLY,
     }
 
 
@@ -150,7 +156,7 @@ def refresh_catalog() -> dict[str, Any]:
     """
     global _catalog
     spec, source = cat.load_spec(session.base_url, session.verify_ssl)
-    _catalog = cat.build_catalog(spec, source)
+    _catalog = cat.build_catalog(spec, source, read_only=READ_ONLY)
     return server_info()
 
 
@@ -202,10 +208,40 @@ def call_operation(
     op = _catalog.operations.get(operation_id)
     if op is None:
         raise ValueError(
-            f"unknown operation_id {operation_id!r}; use search_operations to find one"
+            f"unknown or disabled operation_id {operation_id!r}; use search_operations to find available ones"
+        )
+    if READ_ONLY and op.method != "GET":
+        raise ValueError(
+            f"operation_id {operation_id!r} ({op.method}) blocked: OMADA_MCP_READ_ONLY is active."
+        )
+    if not cat.is_operation_allowed(op.method, op.path, op.operation_id, op.summary, read_only=READ_ONLY):
+        raise ValueError(
+            f"operation_id {operation_id!r} is disabled under security allowlist policy."
         )
     path = cat.build_request_path(op, session.omadac_id, path_params or {})
     return session.request(op.method, path, **cat.build_call_kwargs(query_params, body))
+
+
+def _get_default_site_id() -> str:
+    env_site_id = os.environ.get("OMADA_SITE_ID")
+    if env_site_id:
+        return env_site_id
+    try:
+        sites_res = session.request(
+            "GET",
+            f"/openapi/v1/{session.omadac_id}/sites",
+            params={"page": 1, "pageSize": 10},
+        )
+        sites: list[dict[str, Any]] = []
+        if isinstance(sites_res, list):
+            sites = sites_res
+        elif isinstance(sites_res, dict):
+            sites = sites_res.get("data", []) or sites_res.get("result", [])
+        if sites and isinstance(sites[0], dict) and "id" in sites[0]:
+            return str(sites[0]["id"])
+    except Exception:
+        pass
+    return ""
 
 
 @mcp.tool
@@ -222,6 +258,26 @@ def list_sites(page: int = 1, page_size: int = 100) -> Any:
 def list_devices() -> Any:
     """List all managed devices (access points, switches, gateways) across every site."""
     return session.request("GET", f"/openapi/v1/{session.omadac_id}/devices")
+
+
+@mcp.tool
+def list_clients(site_id: str | None = None, page: int = 1, page_size: int = 50) -> Any:
+    """List connected clients for a specific site or default site."""
+    s_id = site_id or _get_default_site_id()
+    if not s_id:
+        raise ValueError("site_id is required to list clients. Set OMADA_SITE_ID in .env or pass site_id.")
+    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/clients"
+    return session.request("GET", path, params={"page": page, "pageSize": page_size})
+
+
+@mcp.tool
+def get_topology(site_id: str | None = None) -> Any:
+    """Get network topology data for a specific site or default site."""
+    s_id = site_id or _get_default_site_id()
+    if not s_id:
+        raise ValueError("site_id is required to get topology. Set OMADA_SITE_ID in .env or pass site_id.")
+    path = f"/openapi/v1/{session.omadac_id}/sites/{s_id}/topology"
+    return session.request("GET", path)
 
 
 def main() -> None:
