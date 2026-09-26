@@ -370,9 +370,9 @@ class CombinedMCPApp:
                             new_query = f"{query_string}&{new_query}"
                         scope["query_string"] = new_query.encode("utf-8")
 
-                    # Note trailing slash /messages/ to avoid 307 Temporary Redirect
-                    scope["path"] = "/messages/"
-                    scope["raw_path"] = b"/messages/"
+                    # Route to /messages (no trailing slash) as registered by FastMCP SSE
+                    scope["path"] = "/messages"
+                    scope["raw_path"] = b"/messages"
                     await self.sse_app(scope, receive, send)
                     return
                 else:
@@ -387,6 +387,7 @@ class CombinedMCPApp:
 
 def build_server_app(transport: str = "sse") -> Any:
     """Construct the combined FastMCP ASGI application (SSE + Streamable HTTP)."""
+    import contextlib
     from starlette.applications import Starlette
 
     app_sse = mcp.http_app(
@@ -406,8 +407,14 @@ def build_server_app(transport: str = "sse") -> Any:
             sse_transport = r.app.__self__
             break
 
+    @contextlib.asynccontextmanager
+    async def combined_lifespan(app: Any):
+        async with app_sse.router.lifespan_context(app):
+            async with app_streamable.router.lifespan_context(app):
+                yield
+
     combined = CombinedMCPApp(app_sse, app_streamable, sse_transport=sse_transport)
-    parent_app = Starlette(lifespan=app_streamable.router.lifespan_context)
+    parent_app = Starlette(lifespan=combined_lifespan)
     parent_app.mount("", combined)
 
     return parent_app
